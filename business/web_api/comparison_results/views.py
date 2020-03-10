@@ -1,10 +1,13 @@
 # -*- coding:utf-8 -*-
-import logging
+import os
 import json
+import logging
+import zipfile
 import flask
+import datetime
 from io import BytesIO
 from sqlalchemy import func
-from flask import request
+from flask import request, send_from_directory
 from PIL import Image
 from .common import get_image_path
 from . import comparison_results_blu
@@ -17,8 +20,6 @@ from business.models import Wfrecord
 
 
 # 对比结果查询
-
-
 @comparison_results_blu.route('/results', methods=['POST'])
 @error_handler
 def get_results():
@@ -219,3 +220,73 @@ def update_manual_status():
 
     return response.success()
 
+
+# 导出对比查询结果
+@comparison_results_blu.route('/download/result', methods=['GET'])
+@error_handler
+def download_result():
+    start_time = request.args.get('start_time', "", type=str)
+    end_time = request.args.get('end_time', "", type=str)
+    reason_code = request.args.get('reason_code', [], type=str)
+    reason_code = json.loads(reason_code)
+    result_images_path = cons.EXCEL_PATH
+    manual_check_status = json.loads(request.args.get('manual_check_status', []))
+    recog_start_time = request.args.get('recog_start_time', 0, type=int)
+    recog_end_time = request.args.get('recog_end_time', 0, type=int)
+    action = request.args.get('action', '', type=str)
+
+    query = db.session.query(Wfrecord.src_record_id, Wfrecord.src_car_plate_type,
+                             Wfrecord.src_car_plate_number, Wfrecord.sdk_car_plate_number,
+                             Wfrecord.sdk_car_plate_type, Wfrecord.sdk_reason_code,
+                             Wfrecord.data_entry_time, Wfrecord.car_num_pic_url, Wfrecord.car_num_pic_path) \
+                      .filter(Wfrecord.check_status == 2) \
+                      .filter(Wfrecord.sdk_reason_code > 0) \
+                      .filter(Wfrecord.src_car_plate_number != Wfrecord.sdk_car_plate_number)
+    if reason_code:
+        if not cons.NO_CAR_DISPLAY:
+            if 5 in reason_code:
+                reason_code.remove(5)
+        query = query.filter(Wfrecord.sdk_reason_code.in_(reason_code))
+    else:
+        if not cons.NO_CAR_DISPLAY:
+            query = query.filter(Wfrecord.sdk_reason_code != 5)
+
+    if start_time and end_time:
+        query = query \
+            .filter(Wfrecord.data_entry_time >= start_time) \
+            .filter(Wfrecord.data_entry_time <= end_time)
+
+    if recog_start_time and recog_end_time:
+        query = query \
+            .filter(Wfrecord.sdk_recog_time >= recog_start_time) \
+            .filter(Wfrecord.sdk_recog_time <= recog_end_time)
+
+    if manual_check_status:
+        query = query.filter(Wfrecord.manual_check_status.in_(manual_check_status))
+
+    if action:
+        query = query.filter(Wfrecord.src_illegal_action == action)
+
+    records = query.all()
+    # folder_name = '{}_{}_{}_{}'.format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(start_time/1000))),
+    #        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(end_time/1000))), reason_code,
+    #        datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    # folder_name = '{}'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    folder_name = '{}'.format(datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S'))
+
+    # dest_folder = result_images_path + '{}'.format(folder_name)
+    dest_folder = os.path.join(result_images_path, folder_name)
+
+    # if not os.path.exists(dest_folder):
+    #    os.makedirs(dest_folder)
+    zip = zipfile.ZipFile('{}.zip'.format(dest_folder), "w", zipfile.ZIP_DEFLATED)
+
+    for r in records:
+        src = get_image_path(r[-1])
+        dest = os.path.join(dest_folder, '{}_{}_{}.jpg'.format(r[3], r[2], r[-3]))
+        # shutil.copy(src, dest)
+        zip.write(src, dest)
+    zip.close()
+    # zipDir(dest_folder, '{}.zip'.format(dest_folder))
+
+    return send_from_directory(result_images_path, folder_name + '.zip', as_attachment=True)
